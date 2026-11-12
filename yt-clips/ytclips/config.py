@@ -28,6 +28,21 @@ S3_REQUIRED = (ENV_S3_BUCKET, ENV_S3_ACCESS_KEY, ENV_S3_SECRET_KEY)
 # Variante sans service externe : un dossier (tests, disque partagé).
 ENV_STORAGE_DIR = "YTCLIPS_STORAGE_DIR"
 
+# Publication publique : désactivée tant que cette variable ne vaut pas « enabled ».
+ENV_PUBLIC_MODE = "YTCLIPS_PUBLIC_MODE"
+# Fuseau horaire du « un clip public par jour » (défaut : UTC).
+ENV_TIMEZONE = "YTCLIPS_TIMEZONE"
+# Hôtes depuis lesquels « ytclips import » a le droit de télécharger (vide : import désactivé).
+ENV_IMPORT_HOSTS = "YTCLIPS_IMPORT_ALLOWED_HOSTS"
+
+# Modifier la visibilité d'une vidéo exige une permission plus large que l'envoi.
+SCOPE_MANAGE = "https://www.googleapis.com/auth/youtube.force-ssl"
+MANAGE_SCOPES = {
+    SCOPE_MANAGE,
+    "https://www.googleapis.com/auth/youtube",
+    "https://www.googleapis.com/auth/youtubepartner",
+}
+
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",

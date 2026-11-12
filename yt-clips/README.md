@@ -74,8 +74,9 @@ variables d'environnement dans son gestionnaire de secrets : `YOUTUBE_CLIENT_ID`
 Ne les collez jamais dans une conversation, un ticket ou un fichier du dépôt.
 
 À savoir, d'après la documentation Google : tant que l'écran de consentement est en mode « Test », le
-jeton expire au bout de 7 jours (relancer `ytclips auth`) ; et les vidéos envoyées par un projet API
-non vérifié restent verrouillées en privé, ce qui correspond à l'usage voulu ici.
+jeton expire au bout de 7 jours (relancer `ytclips auth`). Depuis le 2 novembre 2026, les vidéos
+envoyées par un projet API non vérifié ne sont plus verrouillées en privé : ce programme précise donc
+toujours la visibilité `private` à l'envoi.
 
 ## 3. Lancer un test
 
@@ -174,6 +175,84 @@ aussitôt avec le code de sortie `4` et un message « L'AUTORISATION GOOGLE A EX
 essai et sans rien modifier. Relancez `ytclips auth` sur votre ordinateur, puis remplacez la valeur de
 `YOUTUBE_REFRESH_TOKEN`. Pour éviter l'expiration hebdomadaire du mode « Test », publiez l'application
 OAuth en production dans la console Google Cloud.
+
+## Sélection automatique, évaluation et publication
+
+Ces commandes travaillent sur le même stockage durable et le même historique que `batch`.
+
+```bash
+ytclips propose                          # analyse une source, enregistre jusqu'à 3 propositions
+ytclips proposals                        # liste : identifiant, timecodes, titre, raison, état, lien
+ytclips review --rights-confirmed        # crée les clips proposés et les envoie en PRIVÉ pour évaluation
+ytclips approve <id> [--title "…"]       # valide : entre dans la file de publication
+ytclips reject <id>                      # refuse : ce passage ne sera plus proposé
+ytclips publish --rights-confirmed       # traite la file ; sans mode public, le clip reste privé
+```
+
+`propose`, `review` et `publish` acceptent `--dry-run`.
+
+### Comment un passage est choisi
+
+`propose` lit la vidéo une fois avec FFmpeg pour relever les changements de plan et les silences, puis
+croise ces mesures avec les sous-titres `.srt` déposés à côté de la vidéo :
+
+- un extrait dure de 20 à 60 secondes, commence au début d'une phrase et finit sur une fin de phrase ;
+- ses bornes ne tombent jamais dans une réplique, et se calent sur un changement de plan s'il y en a un
+  à moins de 1,5 s ;
+- sont écartés : les paroles de chanson et indications (`♪`, `[Musique]`), les passages sans dialogue de
+  plus de 4 s (génériques, plans muets), les silences de plus de 4 s, et tout passage déjà envoyé ou
+  déjà proposé pour cette vidéo, même refusé ;
+- au plus 3 extraits sans recouvrement sont retenus par vidéo ; `--skip-start` et `--skip-end` écartent
+  un générique de durée connue.
+
+Le score classe les passages selon la continuité du dialogue et la netteté des bornes. Il ne prédit
+pas l'audience d'un clip. Le titre et la description sont tirés des répliques : ce sont des brouillons,
+à corriger avec `approve --title`.
+
+Chaque proposition est une fiche `state/proposals/<identifiant>.json` : timecodes, titre, description,
+raison de la sélection, mesures, état, et lien de la vidéo une fois envoyée.
+
+Une source analysée et sans fiche manuelle `.json` est laissée à la sélection automatique : `batch` ne
+la traite plus. Les sources ne sont jamais modifiées ni supprimées.
+
+### Sans sous-titres
+
+Les bornes sont alors posées sur les pauses de la bande-son, sans garantie sur les fins de phrases ;
+la proposition le signale dans sa raison. Aucune transcription n'est activée. Deux options, à décider :
+
+| Option | Coût | Besoins |
+| --- | --- | --- |
+| Transcription locale (modèle Whisper libre) | gratuit | nouvelle dépendance Python, modèle de plusieurs centaines de Mo à télécharger dans chaque environnement neuf, temps de calcul non mesuré |
+| API de transcription OpenAI | de 0,003 à 0,006 $ par minute d'audio selon le modèle (tarifs publiés le 12/11/2026), soit environ 0,14 à 0,27 $ pour 45 minutes | clé d'API en variable de projet, audio transmis à un tiers |
+
+### Publication publique
+
+Tout clip est d'abord envoyé en privé. Le rendre public consiste à modifier la visibilité de cette
+vidéo ; il n'est jamais envoyé une seconde fois. Le mode public exige les deux verrous à la fois :
+
+- la variable `YTCLIPS_PUBLIC_MODE=enabled` ;
+- l'option `--public` de la commande `publish`.
+
+`publish --public` rend alors public le plus ancien clip validé, **un seul par jour** (jour UTC, ou
+celui du fuseau `YTCLIPS_TIMEZONE`). Le créneau du jour est une fiche `state/publications/<date>.json`
+créée de façon exclusive : deux exécutions simultanées ne publient pas deux clips. Après une
+interruption, l'exécution suivante relit l'état réel de la vidéo avant d'agir. Trois refus de YouTube
+pour un même clip le mettent « à vérifier ».
+
+Modifier la visibilité demande une permission Google plus large que l'envoi (« voir, modifier et
+supprimer vos vidéos YouTube »). `ytclips check` indique si elle est accordée. Sinon : `ytclips auth
+--public` sur votre ordinateur, puis remplacer `YOUTUBE_REFRESH_TOKEN`.
+
+### Import depuis une source autorisée
+
+```bash
+ytclips import https://media.exemple.org/videos/episode.mp4 --rights-confirmed
+```
+
+L'import est désactivé tant que `YTCLIPS_IMPORT_ALLOWED_HOSTS` ne liste pas les hôtes dont vous avez
+le droit de reprendre les vidéos. Il ne fait que télécharger en HTTPS un fichier vidéo désigné
+directement, sans jamais remplacer une source existante. Une page web, un lecteur, un accès refusé ou
+un fichier illisible arrêtent l'import : aucune protection n'est contournée.
 
 ## Emplacements
 

@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import __version__, batch, clipmeta, config, history, ledger, logs, media, storage, youtube
+from . import __version__, batch, clipmeta, config, curate_cli, curation, history, ledger, logs, media, storage, youtube
 
 log = logging.getLogger("ytclips")
 
@@ -136,11 +136,24 @@ def cmd_check(args: argparse.Namespace) -> int:
     connected = False
     if source and libs_ok and network_ok and not args.offline:
         try:
-            channel = youtube.channel_info(youtube.load_credentials())
+            creds = youtube.load_credentials()
+            channel = youtube.channel_info(creds)
             connected = channel is not None
             report(connected, f"connexion à la chaîne : {channel['title']} ({channel['id']})" if channel else "aucune chaîne YouTube sur ce compte")
         except Exception as error:  # noqa: BLE001 - diagnostic, on rapporte tout
             report(False, f"connexion à la chaîne : {logs.redact(str(error))[:600]}")
+        if connected:
+            try:
+                manage = youtube.can_manage(youtube.granted_scopes(creds))
+                report(None, "permission de rendre un clip public : " + (
+                    "accordée" if manage else "absente (« ytclips auth --public » requis avant toute publication publique)"
+                ))
+            except youtube.YouTubeError as error:
+                report(None, f"permission de rendre un clip public : non vérifiée ({error})")
+    report(None, "mode public : " + (
+        f"variable {config.ENV_PUBLIC_MODE}=enabled (l'option --public reste nécessaire)"
+        if curation.public_mode(True) else "désactivé"
+    ))
 
     durable_ok = _check_storage(report, args.offline)
 
@@ -161,7 +174,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 # --- auth ------------------------------------------------------------------
 
 def cmd_auth(args: argparse.Namespace) -> int:
-    target = youtube.run_auth(no_browser=args.no_browser, port=args.port)
+    target = youtube.run_auth(no_browser=args.no_browser, port=args.port, public=args.public)
     log.info("Connexion enregistrée dans %s (lecture réservée à votre utilisateur).", target)
     try:
         channel = youtube.channel_info(youtube.load_credentials())
@@ -422,6 +435,8 @@ def build_parser() -> argparse.ArgumentParser:
     auth = commands.add_parser("auth", help="connecter la chaîne YouTube (OAuth)")
     auth.add_argument("--no-browser", action="store_true", help="machine sans navigateur : copier-coller manuel")
     auth.add_argument("--port", type=int, default=8765, help="port local de redirection (défaut 8765)")
+    auth.add_argument("--public", action="store_true",
+                      help="demander aussi la permission de modifier la visibilité des vidéos (publication publique)")
     auth.set_defaults(handler=cmd_auth)
 
     clip = commands.add_parser("clip", help="créer un clip vertical")
@@ -462,6 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     hist.add_argument("--release", metavar="ID",
                       help="libérer une entrée « pending » après vérification (numéro local, ou début de clé avec --remote)")
     hist.set_defaults(handler=cmd_history)
+    curate_cli.register(commands)
     return parser
 
 
