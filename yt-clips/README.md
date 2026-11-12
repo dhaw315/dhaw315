@@ -254,6 +254,49 @@ le droit de reprendre les vidéos. Il ne fait que télécharger en HTTPS un fich
 directement, sans jamais remplacer une source existante. Une page web, un lecteur, un accès refusé ou
 un fichier illisible arrêtent l'import : aucune protection n'est contournée.
 
+## TikTok : préparation pour une publication manuelle
+
+TikTok est une seconde destination, indépendante de YouTube. Le programme n'appelle pas l'API de
+TikTok : il prépare, pour chaque clip déjà produit dans `clips/`, une légende modifiable et un lien de
+téléchargement, et il tient un historique propre à TikTok.
+
+```bash
+ytclips tiktok prepare                    # une fiche par clip du stockage (jamais réécrite ensuite)
+ytclips tiktok list                       # identifiant, état, clip, légende
+ytclips tiktok caption <id> --text "…"    # modifier la légende (hashtags compris, 2200 caractères au plus)
+ytclips tiktok link <id>                  # légende + lien de téléchargement du clip, valable 24 h
+ytclips tiktok done <id> [--url https://…]  # noter la publication faite dans l'application TikTok
+ytclips tiktok skip <id>                  # écarter ce clip pour TikTok ; « reopen » pour revenir en arrière
+```
+
+Parcours : `link` sur l'ordinateur, ouvrir le lien sur le téléphone, enregistrer la vidéo, la publier
+dans l'application TikTok en collant la légende, puis `done`. Le lien donne accès au fichier pendant sa
+durée de validité : ne le partagez pas. Le clip est aussi téléchargeable depuis le tableau de bord R2.
+
+Les fiches sont dans `state/tiktok/`, l'historique YouTube dans `state/history/` : aucune commande
+TikTok ne lit ni n'écrit l'historique YouTube, et inversement. Un clip refusé par YouTube reste
+disponible pour TikTok ; une proposition refusée avec `reject` n'est pas préparée. Les clips sont
+ceux produits par ce programme à partir de vos sources : ils ne portent aucun logo ni filigrane.
+
+### Pourquoi pas de publication par l'API
+
+D'après la documentation officielle de TikTok, consultée le 12 novembre 2026 :
+
+- **Publication directe** (`video.publish`) : tant que l'application n'a pas passé l'audit de TikTok,
+  les publications sont limitées à la visibilité « moi uniquement », le compte doit être privé au
+  moment de l'envoi, et le choix de la visibilité doit être fait à la main par l'utilisateur à chaque
+  publication, sans valeur par défaut. Ce n'est pas compatible avec une exécution automatique.
+- **Audit** : les règles de TikTok citent comme non acceptable « un outil utilitaire qui aide à
+  envoyer des contenus sur le ou les comptes que vous ou votre équipe gérez ». C'est le cas de ce
+  programme : l'audit a peu de chances d'aboutir.
+- **Envoi en brouillon** (`video.upload`) : la vidéo arrive dans la boîte de réception TikTok du compte,
+  qui finalise et publie depuis l'application ; la légende ne peut pas être transmise par ce canal et
+  il y a au plus 5 brouillons en attente par 24 heures. Cette permission demande elle aussi la
+  validation de l'application, sauf dans le mode « Sandbox », prévu pour les essais (10 comptes au
+  plus). Ce parcours n'est pas implémenté.
+
+Aucun robot de navigateur n'est utilisé pour contourner ces limites.
+
 ## Emplacements
 
 | Quoi | Où | Variable pour changer |

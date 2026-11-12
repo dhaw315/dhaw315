@@ -16,7 +16,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import __version__, batch, clipmeta, config, curate_cli, curation, history, ledger, logs, media, storage, youtube
+from . import (
+    __version__, batch, clipmeta, config, curate_cli, curation, history, ledger, logs, media, storage, tiktok_cli, youtube,
+)
 
 log = logging.getLogger("ytclips")
 
@@ -478,6 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="libérer une entrée « pending » après vérification (numéro local, ou début de clé avec --remote)")
     hist.set_defaults(handler=cmd_history)
     curate_cli.register(commands)
+    tiktok_cli.register(commands)
     return parser
 
 

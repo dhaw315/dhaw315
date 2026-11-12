@@ -97,6 +97,10 @@ class LocalStorage:
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
 
+    def presign(self, key: str, seconds: int) -> str:
+        """Dossier local : le chemin du fichier tient lieu de lien."""
+        return str(self._path(key))
+
 
 class S3Storage:
     """Bucket compatible S3 (Cloudflare R2, AWS S3, MinIO…)."""
@@ -231,6 +235,12 @@ class S3Storage:
             self._call("supprimer", self.client.delete_object, Bucket=self.bucket, Key=self.prefix + key)
         except ClientError as error:
             raise self._fail("supprimer", error) from None
+
+    def presign(self, key: str, seconds: int) -> str:
+        """Lien de téléchargement temporaire vers un objet du bucket privé (signé localement)."""
+        return self.client.generate_presigned_url(
+            "get_object", Params={"Bucket": self.bucket, "Key": self.prefix + key}, ExpiresIn=seconds
+        )
 
 
 def configured_kind() -> str | None:
