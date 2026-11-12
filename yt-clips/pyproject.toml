@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ytclips"
+version = "0.1.0"
+description = "Clips verticaux 1080x1920 avec FFmpeg et envoi privé sur YouTube"
+requires-python = ">=3.10"
+dependencies = [
+    "google-api-python-client>=2.100",
+    "google-auth>=2.23",
+    "google-auth-httplib2>=0.2",
+    "google-auth-oauthlib>=1.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+ytclips = "ytclips.cli:main"
+
+[tool.setuptools]
+packages = ["ytclips"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

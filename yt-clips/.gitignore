@@ -1,0 +1,18 @@
+# Médias et données locales : jamais dans le dépôt
+input/*
+output/*
+!input/.gitkeep
+!output/.gitkeep
+data/
+# Identifiants et jetons : jamais dans le dépôt
+client_secret*.json
+token*.json
+credentials*.json
+*.pem
+.env
+.env.*
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
