@@ -81,14 +81,14 @@ def is_auth_error(error: Exception) -> bool:
 
 
 def _env_client() -> tuple[str, str] | None:
-    client_id = os.environ.get(config.ENV_CLIENT_ID)
-    client_secret = os.environ.get(config.ENV_CLIENT_SECRET)
+    client_id = config.env(config.ENV_CLIENT_ID)
+    client_secret = config.env(config.ENV_CLIENT_SECRET)
     return (client_id, client_secret) if client_id and client_secret else None
 
 
 def credential_source() -> str | None:
     """Indique d'où viendraient les identifiants, sans jamais les lire ni les afficher."""
-    if _env_client() and os.environ.get(config.ENV_REFRESH_TOKEN):
+    if _env_client() and config.env(config.ENV_REFRESH_TOKEN):
         return "variables d'environnement"
     if config.token_path().is_file():
         return f"fichier {config.token_path()}"
@@ -123,7 +123,7 @@ def load_credentials():
     from google.oauth2.credentials import Credentials
 
     client = _env_client()
-    refresh_token = os.environ.get(config.ENV_REFRESH_TOKEN)
+    refresh_token = config.env(config.ENV_REFRESH_TOKEN)
     if client and refresh_token:
         creds = Credentials(
             None, refresh_token=refresh_token, token_uri=config.TOKEN_URI,

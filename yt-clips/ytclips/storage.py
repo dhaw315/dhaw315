@@ -235,30 +235,30 @@ class S3Storage:
 
 def configured_kind() -> str | None:
     """« local », « s3 » ou None, sans lire aucune valeur secrète."""
-    if os.environ.get(config.ENV_STORAGE_DIR):
+    if config.env(config.ENV_STORAGE_DIR):
         return "local"
-    if any(os.environ.get(name) for name in config.S3_REQUIRED):
+    if any(config.env(name) for name in config.S3_REQUIRED):
         return "s3"
     return None
 
 
 def from_env():
     """Construit le stockage décrit par l'environnement, ou None s'il n'est pas configuré."""
-    local = os.environ.get(config.ENV_STORAGE_DIR)
+    local = config.env(config.ENV_STORAGE_DIR)
     if local:
         return LocalStorage(Path(local))
-    missing = [name for name in config.S3_REQUIRED if not os.environ.get(name)]
+    missing = [name for name in config.S3_REQUIRED if not config.env(name)]
     if len(missing) == len(config.S3_REQUIRED):
         return None
     if missing:
         raise StorageError("Stockage S3 incomplet, variable(s) manquante(s) : " + ", ".join(missing))
     return S3Storage(
-        bucket=os.environ[config.ENV_S3_BUCKET],
-        access_key=os.environ[config.ENV_S3_ACCESS_KEY],
-        secret_key=os.environ[config.ENV_S3_SECRET_KEY],
-        endpoint_url=os.environ.get(config.ENV_S3_ENDPOINT),
-        region=os.environ.get(config.ENV_S3_REGION) or "auto",
-        prefix=os.environ.get(config.ENV_S3_PREFIX) or "",
+        bucket=config.env(config.ENV_S3_BUCKET),
+        access_key=config.env(config.ENV_S3_ACCESS_KEY),
+        secret_key=config.env(config.ENV_S3_SECRET_KEY),
+        endpoint_url=config.env(config.ENV_S3_ENDPOINT),
+        region=config.env(config.ENV_S3_REGION) or "auto",
+        prefix=config.env(config.ENV_S3_PREFIX) or "",
     )
 
 
