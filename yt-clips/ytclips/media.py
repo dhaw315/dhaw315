@@ -105,14 +105,33 @@ def _srt_stamp(ms: int) -> str:
     return format_timecode(ms).replace(".", ",")
 
 
-def read_srt(path: Path) -> str:
-    raw = path.read_bytes()
+def decode_text(raw: bytes) -> str:
     for encoding in ("utf-8-sig", "cp1252"):
         try:
             return raw.decode(encoding)
         except UnicodeDecodeError:
             continue
     return raw.decode("latin-1")
+
+
+def read_srt(path: Path) -> str:
+    return decode_text(path.read_bytes())
+
+
+def parse_srt(text: str) -> list[tuple[int, int, str]]:
+    """Répliques (début ms, fin ms, texte) dans l'ordre chronologique."""
+    cues = []
+    for block in re.split(r"\r?\n\s*\r?\n", text.strip()):
+        lines = block.splitlines()
+        index = next((i for i, line in enumerate(lines) if _SRT_TIME.search(line)), None)
+        if index is None:
+            continue
+        match = _SRT_TIME.search(lines[index])
+        start, end = _srt_ms(*match.group(1, 2, 3, 4)), _srt_ms(*match.group(5, 6, 7, 8))
+        body = "\n".join(lines[index + 1 :]).strip()
+        if end > start and body:
+            cues.append((start, end, body))
+    return sorted(cues)
 
 
 def shift_srt(text: str, offset_ms: int, duration_ms: int) -> str:
@@ -142,8 +161,8 @@ def shift_srt(text: str, offset_ms: int, duration_ms: int) -> str:
 # --- Rendu -----------------------------------------------------------------
 
 SUBTITLE_STYLE = (
-    "FontName=DejaVu Sans,FontSize=11,Bold=1,PrimaryColour=&H00FFFFFF,"
-    "OutlineColour=&H00000000,BorderStyle=1,Outline=1.2,Shadow=0,Alignment=2,MarginV=62,"
+    "FontName=DejaVu Sans,FontSize=9,Bold=1,PrimaryColour=&H00FFFFFF,"
+    "OutlineColour=&H00000000,BorderStyle=1,Outline=1.2,Shadow=0,Alignment=2,MarginV=50,"
     "MarginL=20,MarginR=20"
 )
 

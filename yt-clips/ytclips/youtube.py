@@ -177,14 +177,16 @@ def _client_config() -> dict:
     return data
 
 
-def run_auth(no_browser: bool = False, port: int = 8765) -> Path:
+def run_auth(no_browser: bool = False, port: int = 8765, public: bool = False) -> Path:
     """Flux OAuth « application de bureau » ; écrit token.json (0600) hors du dépôt."""
     _require_libs()
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     target = config.token_path()
     _refuse_repo(target)
-    flow = InstalledAppFlow.from_client_config(_client_config(), config.SCOPES)
+    flow = InstalledAppFlow.from_client_config(
+        _client_config(), config.SCOPES + ([config.SCOPE_MANAGE] if public else [])
+    )
     if no_browser:
         flow.redirect_uri = f"http://localhost:{port}/"
         url, state = flow.authorization_url(access_type="offline", prompt="consent")
@@ -256,3 +258,50 @@ def upload_private(creds, clip: Path, body: dict) -> dict:
         if status:
             log.info("Envoi : %d %%", int(status.progress() * 100))
     return response
+
+
+# --- Publication publique : uniquement par changement de visibilité ----------
+
+MANAGE_SCOPE_HELP = (
+    "La connexion actuelle autorise l'envoi de vidéos, mais pas la modification de leur visibilité.\n"
+    "Aucune publication publique ne sera tentée tant que cette permission manque.\n"
+    "Pour l'accorder :\n"
+    "  1. sur votre ordinateur, lancer « ytclips auth --public » et accepter la demande de Google\n"
+    "     (voir, modifier et supprimer vos vidéos YouTube) ;\n"
+    f"  2. recopier le nouveau « refresh_token » de token.json dans la variable {config.ENV_REFRESH_TOKEN}."
+)
+
+# Champs modifiables de « status » : videos.update efface ceux qu'on ne renvoie pas.
+STATUS_FIELDS = ("embeddable", "license", "publicStatsViewable", "selfDeclaredMadeForKids", "containsSyntheticMedia")
+
+
+def granted_scopes(creds) -> set[str]:
+    """Permissions réellement accordées au jeton, d'après Google."""
+    import urllib.parse
+    import urllib.request
+
+    data = urllib.parse.urlencode({"access_token": creds.token}).encode()
+    try:
+        request = urllib.request.Request("https://oauth2.googleapis.com/tokeninfo", data=data)
+        with urllib.request.urlopen(request, timeout=15) as response:
+            info = json.loads(response.read())
+    except Exception as error:  # noqa: BLE001 - le message d'origine peut contenir le jeton
+        raise YouTubeError(f"Permissions du jeton illisibles ({type(error).__name__}).") from None
+    return set(str(info.get("scope", "")).split())
+
+
+def can_manage(scopes) -> bool:
+    return bool(set(scopes) & config.MANAGE_SCOPES)
+
+
+def video_status(creds, video_id: str) -> dict | None:
+    items = _service(creds).videos().list(part="status", id=video_id).execute().get("items") or []
+    return items[0]["status"] if items else None
+
+
+def make_public(creds, video_id: str, current: dict) -> str:
+    """Rend publique une vidéo déjà en ligne ; renvoie la visibilité confirmée par YouTube."""
+    status = {name: current[name] for name in STATUS_FIELDS if name in current}
+    status["privacyStatus"] = "public"
+    response = _service(creds).videos().update(part="status", body={"id": video_id, "status": status}).execute()
+    return response.get("status", {}).get("privacyStatus", "inconnue")

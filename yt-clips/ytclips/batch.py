@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from .ledger import Ledger
 
 log = logging.getLogger("ytclips")
 
-SOURCES, CLIPS, RUNS = "sources/", "clips/", "state/runs/"
+SOURCES, CLIPS, RUNS, ANALYSIS = "sources/", "clips/", "state/runs/", "state/analysis/"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 SPEC_KEYS = {"start", "end", "title", "description", "tags", "background", "srt_timing"}
 
@@ -47,6 +48,7 @@ class Outcome:
     result: str
     detail: str
     stop: bool = False  # inutile de poursuivre le lot (problème côté YouTube)
+    video_id: str = ""
 
 
 def list_sources(storage) -> list[Source]:
@@ -98,15 +100,100 @@ def _resolve_range(spec: dict, duration_ms: int) -> tuple[int, int]:
     return start_ms, end_ms
 
 
-def _skip(source: Source, decision) -> Outcome:
+def _skip(label: str, decision) -> Outcome:
     needs_action = decision.action in (ledger_module.BLOCKED, ledger_module.EXHAUSTED)
-    return Outcome(source.key, ATTENTION if needs_action else SKIPPED, decision.reason.splitlines()[0])
+    return Outcome(label, ATTENTION if needs_action else SKIPPED, decision.reason.splitlines()[0])
 
 
 def _tags(value) -> list[str]:
     if isinstance(value, str):
         return [tag.strip() for tag in value.split(",") if tag.strip()]
     return list(value or [])
+
+
+def slug(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-")[:60] or "clip"
+
+
+def send_extract(
+    storage, ledger: Ledger, creds, run_id: str, *, label: str, source_key: str, srt_key: str | None,
+    local: Path, meta: dict, background: str, srt_timing: str, attempt: int, work: Path,
+) -> Outcome:
+    """Réserve l'extrait, crée le clip, le conserve puis l'envoie en privé. `meta` est déjà validée."""
+    clip = meta["clip"]
+    start_ms, end_ms = clip["start_ms"], clip["end_ms"]
+    key = ledger_module.content_key(clip["source_sha256"], start_ms, end_ms)
+    record = ledger.claim(key, attempt, {
+        "run_id": run_id, "source_key": source_key, "source_sha256": clip["source_sha256"],
+        "start_ms": start_ms, "end_ms": end_ms, "title": meta["youtube"]["title"], "clip_key": None,
+    })
+    if record is None:
+        return Outcome(label, SKIPPED, "réservé au même instant par une autre exécution")
+
+    # Avant l'envoi : aucune vidéo ne peut exister, tout arrêt est consigné comme un échec sûr.
+    try:
+        srt_local = None
+        if srt_key:
+            srt_local = work / "source.srt"
+            storage.download(srt_key, srt_local)
+        output = work / clip["file"]
+        log.info(
+            "Création du clip : de %s à %s, fond « %s ».",
+            media.format_timecode(start_ms), media.format_timecode(end_ms), background,
+        )
+        produced = media.render_clip(local, output, start_ms, end_ms, background, srt_local, srt_timing)
+        clip.update(sha256=media.sha256_file(output), subtitles=produced["subtitles"])
+        meta_file = output.with_suffix(".json")
+        clipmeta.save(meta_file, meta)
+        clip_key = f"{CLIPS}{output.stem}_{key[:8]}.mp4"
+        storage.upload(output, clip_key)
+        storage.upload(meta_file, clip_key[:-4] + ".json")
+        ledger.update(record, phase=ledger_module.RENDERED, clip_key=clip_key)
+        body = clipmeta.request_body(meta)
+    except media.MediaError as error:
+        ledger.fail(record, "error", str(error))
+        return Outcome(label, FAILED, str(error).splitlines()[0])
+    except BaseException as error:
+        ledger.fail(record, "interrupted", logs.redact(f"{type(error).__name__}: {error}"))
+        raise
+
+    ledger.update(record, phase=ledger_module.UPLOADING)
+    conflict = ledger.conflict(record)
+    if conflict:
+        ledger.fail(record, "superseded", conflict)
+        return Outcome(label, SKIPPED, conflict)
+
+    log.info("Envoi en mode PRIVÉ de « %s »…", body["snippet"]["title"])
+    try:
+        response = youtube.upload_private(creds, output, body)
+    except Exception as error:  # noqa: BLE001 - on classe l'erreur pour décider de la suite
+        message = logs.redact(f"{type(error).__name__}: {error}")
+        if youtube.is_auth_error(error):
+            # Requête rejetée avant d'aboutir : aucune vidéo créée.
+            ledger.fail(record, "auth", message)
+            raise youtube.auth_error(error) from None
+        status = getattr(getattr(error, "resp", None), "status", None)
+        if status is not None and 400 <= int(status) < 500:
+            ledger.fail(record, "error", message)
+            return Outcome(label, FAILED, f"refusé par YouTube (HTTP {status}), aucune vidéo créée", stop=True)
+        ledger.update(record, error=message[:1000])
+        return Outcome(
+            label, FAILED,
+            "envoi interrompu, issue inconnue : vérifier YouTube Studio, puis "
+            f"« ytclips history --remote --release {key[:12]} » si aucune vidéo n'a été créée",
+            stop=True,
+        )
+
+    video_id = response.get("id", "")
+    privacy = response.get("status", {}).get("privacyStatus", "inconnue")
+    ledger.update(record, status=ledger_module.UPLOADED, phase=ledger_module.FINISHED, video_id=video_id, privacy=privacy)
+    if privacy != config.PRIVACY:
+        return Outcome(
+            label, FAILED,
+            f"ALERTE : vidéo {video_id} envoyée, mais YouTube indique la visibilité « {privacy} »",
+            stop=True, video_id=video_id,
+        )
+    return Outcome(label, UPLOADED, f"https://youtu.be/{video_id} — visibilité private confirmée", video_id=video_id)
 
 
 def _process(storage, ledger: Ledger, source: Source, creds, run_id: str, dry_run: bool,
@@ -120,7 +207,6 @@ def _process(storage, ledger: Ledger, source: Source, creds, run_id: str, dry_ru
     # Préparation : toute erreur ici est propre à la source et sera consignée.
     problem = None
     start_ms = end_ms = -1
-    srt_local = None
     try:
         spec = _load_spec(storage, source)
         info = media.probe(local)
@@ -131,9 +217,9 @@ def _process(storage, ledger: Ledger, source: Source, creds, run_id: str, dry_ru
         if srt_timing not in ("source", "clip"):
             raise SpecError("« srt_timing » doit valoir « source » ou « clip ».")
         title = str(spec.get("title") or name.stem.replace("_", " ").strip())[:100]
-        clip_name = f"{_slug(name.stem)}_{start_ms}-{end_ms}"
         meta = clipmeta.new_meta(
-            clip_file=clip_name + ".mp4", clip_sha256="0", source_name=name.name, source_sha256=source_sha,
+            clip_file=f"{slug(name.stem)}_{start_ms}-{end_ms}.mp4", clip_sha256="0",
+            source_name=name.name, source_sha256=source_sha,
             start_ms=start_ms, end_ms=end_ms, background=background, subtitles=False,
             title=title, description=str(spec.get("description", "")), tags=_tags(spec.get("tags")),
         )
@@ -149,7 +235,8 @@ def _process(storage, ledger: Ledger, source: Source, creds, run_id: str, dry_ru
         if problem:
             return Outcome(source.key, FAILED, f"SIMULATION — {problem.splitlines()[0]}")
         if decision.action != ledger_module.TAKE:
-            return _skip(source, decision)
+            return _skip(source.key, decision)
+        srt_local = None
         if source.srt_key:
             srt_local = work / "source.srt"
             storage.download(source.srt_key, srt_local)
@@ -168,86 +255,39 @@ def _process(storage, ledger: Ledger, source: Source, creds, run_id: str, dry_ru
         "content_key": key, "source_key": source.key, "start_ms": start_ms, "end_ms": end_ms,
     })
     if decision.action != ledger_module.TAKE:
-        return _skip(source, decision)
+        return _skip(source.key, decision)
 
-    record = ledger.claim(key, len(decision.attempts) + 1, {
-        "run_id": run_id, "source_key": source.key, "source_sha256": source_sha,
-        "start_ms": start_ms, "end_ms": end_ms, "title": None if problem else title, "clip_key": None,
-    })
-    if record is None:
-        return Outcome(source.key, SKIPPED, "réservé au même instant par une autre exécution")
     if problem:
+        record = ledger.claim(key, len(decision.attempts) + 1, {
+            "run_id": run_id, "source_key": source.key, "source_sha256": source_sha,
+            "start_ms": start_ms, "end_ms": end_ms, "title": None, "clip_key": None,
+        })
+        if record is None:
+            return Outcome(source.key, SKIPPED, "réservé au même instant par une autre exécution")
         ledger.fail(record, "error", problem)
         return Outcome(source.key, FAILED, problem.splitlines()[0])
 
-    # Avant l'envoi : aucune vidéo ne peut exister, tout arrêt est consigné comme un échec sûr.
-    try:
-        if source.srt_key:
-            srt_local = work / "source.srt"
-            storage.download(source.srt_key, srt_local)
-        output = work / meta["clip"]["file"]
-        log.info(
-            "Création du clip : de %s à %s, fond « %s ».",
-            media.format_timecode(start_ms), media.format_timecode(end_ms), background,
-        )
-        produced = media.render_clip(local, output, start_ms, end_ms, background, srt_local, srt_timing)
-        meta["clip"].update(sha256=media.sha256_file(output), subtitles=produced["subtitles"])
-        meta_file = output.with_suffix(".json")
-        clipmeta.save(meta_file, meta)
-        clip_key = f"{CLIPS}{clip_name}_{key[:8]}.mp4"
-        storage.upload(output, clip_key)
-        storage.upload(meta_file, clip_key[:-4] + ".json")
-        ledger.update(record, phase=ledger_module.RENDERED, clip_key=clip_key)
-        body = clipmeta.request_body(meta)
-    except media.MediaError as error:
-        ledger.fail(record, "error", str(error))
-        return Outcome(source.key, FAILED, str(error).splitlines()[0])
-    except BaseException as error:
-        ledger.fail(record, "interrupted", logs.redact(f"{type(error).__name__}: {error}"))
-        raise
-
-    ledger.update(record, phase=ledger_module.UPLOADING)
-    conflict = ledger.conflict(record)
-    if conflict:
-        ledger.fail(record, "superseded", conflict)
-        return Outcome(source.key, SKIPPED, conflict)
-
-    log.info("Envoi en mode PRIVÉ de « %s »…", body["snippet"]["title"])
-    try:
-        response = youtube.upload_private(creds, output, body)
-    except Exception as error:  # noqa: BLE001 - on classe l'erreur pour décider de la suite
-        message = logs.redact(f"{type(error).__name__}: {error}")
-        if youtube.is_auth_error(error):
-            # Requête rejetée avant d'aboutir : aucune vidéo créée.
-            ledger.fail(record, "auth", message)
-            raise youtube.auth_error(error) from None
-        status = getattr(getattr(error, "resp", None), "status", None)
-        if status is not None and 400 <= int(status) < 500:
-            ledger.fail(record, "error", message)
-            return Outcome(source.key, FAILED, f"refusé par YouTube (HTTP {status}), aucune vidéo créée", stop=True)
-        ledger.update(record, error=message[:1000])
-        return Outcome(
-            source.key, FAILED,
-            "envoi interrompu, issue inconnue : vérifier YouTube Studio, puis "
-            f"« ytclips history --remote --release {key[:12]} » si aucune vidéo n'a été créée",
-            stop=True,
-        )
-
-    video_id = response.get("id", "")
-    privacy = response.get("status", {}).get("privacyStatus", "inconnue")
-    ledger.update(record, status=ledger_module.UPLOADED, phase=ledger_module.FINISHED, video_id=video_id, privacy=privacy)
-    if privacy != config.PRIVACY:
-        return Outcome(
-            source.key, FAILED,
-            f"ALERTE : vidéo {video_id} envoyée, mais YouTube indique la visibilité « {privacy} »", stop=True,
-        )
-    return Outcome(source.key, UPLOADED, f"https://youtu.be/{video_id} — visibilité private confirmée")
+    return send_extract(
+        storage, ledger, creds, run_id, label=source.key, source_key=source.key, srt_key=source.srt_key,
+        local=local, meta=meta, background=background, srt_timing=srt_timing,
+        attempt=len(decision.attempts) + 1, work=work,
+    )
 
 
-def _slug(text: str) -> str:
-    import re
+def save_report(storage, run_id: str, kind: str, outcomes: list[Outcome]) -> None:
+    report = {"run_id": run_id, "kind": kind, "at": ledger_module.now(), "outcomes": [vars(o) for o in outcomes]}
+    storage.write(
+        f"{RUNS}{report['at'].replace(':', '')}-{run_id}.json",
+        logs.redact(json.dumps(report, ensure_ascii=False, indent=2)).encode(),
+    )
 
-    return re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-")[:60] or "clip"
+
+def log_outcomes(outcomes: list[Outcome]) -> None:
+    for outcome in outcomes:
+        log.info("  [%s] %s — %s", outcome.result, outcome.source, outcome.detail)
+    waiting = sum(1 for outcome in outcomes if outcome.result == ATTENTION)
+    if waiting:
+        log.warning("%d élément(s) « à vérifier » : une action manuelle est attendue, ils ne seront pas retentés.", waiting)
 
 
 def run(storage, *, limit: int, dry_run: bool, stale_seconds: float, max_attempts: int) -> tuple[list[Outcome], bool]:
@@ -264,11 +304,15 @@ def run(storage, *, limit: int, dry_run: bool, stale_seconds: float, max_attempt
     stopped = False
     auth_failure = None
     for source in list_sources(storage):
+        # Une source analysée par « propose » et sans fiche manuelle relève de la sélection automatique.
+        if not source.spec_key and storage.read(f"{ANALYSIS}{source.fingerprint}.json"):
+            outcomes.append(Outcome(source.key, SKIPPED, "gérée par la sélection automatique (voir « ytclips proposals »)"))
+            continue
         known = ledger.lookup(source.fingerprint)
         if known:
             decision = ledger.decide(known["content_key"], stale_seconds, max_attempts)
             if decision.action != ledger_module.TAKE:
-                outcomes.append(_skip(source, decision))
+                outcomes.append(_skip(source.key, decision))
                 continue
         if stopped or handled >= limit:
             outcomes.append(Outcome(source.key, WAITING, "sera traitée par une prochaine exécution"))
@@ -286,25 +330,14 @@ def run(storage, *, limit: int, dry_run: bool, stale_seconds: float, max_attempt
             handled += 1
         stopped = stopped or outcome.stop
 
-    for outcome in outcomes:
-        log.info("  [%s] %s — %s", outcome.result, outcome.source, outcome.detail)
-    waiting = sum(1 for outcome in outcomes if outcome.result == ATTENTION)
-    if waiting:
-        log.warning("%d source(s) « à vérifier » : une action manuelle est attendue, elles ne seront pas retentées.", waiting)
+    log_outcomes(outcomes)
     if not outcomes:
         log.info("Aucune vidéo dans « %s » du stockage.", SOURCES)
     elif handled == 0:
         log.info("Rien à traiter : aucune source nouvelle.")
 
     if not dry_run:
-        report = {
-            "run_id": run_id, "at": ledger_module.now(),
-            "outcomes": [vars(outcome) for outcome in outcomes],
-        }
-        storage.write(
-            f"{RUNS}{report['at'].replace(':', '')}-{run_id}.json",
-            logs.redact(json.dumps(report, ensure_ascii=False, indent=2)).encode(),
-        )
+        save_report(storage, run_id, "batch", outcomes)
     if auth_failure:
         raise auth_failure
     return outcomes, not any(outcome.result == FAILED for outcome in outcomes)
