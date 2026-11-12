@@ -35,6 +35,11 @@ SCOPES = [
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
+def env(name: str) -> str:
+    """Valeur d'une variable, sans les blancs ou sauts de ligne collés par erreur autour."""
+    return (os.environ.get(name) or "").strip()
+
+
 def data_dir() -> Path:
     """Historique et journaux (ignorés par git)."""
     return Path(os.environ.get("YTCLIPS_DATA_DIR") or PROJECT_ROOT / "data").expanduser()

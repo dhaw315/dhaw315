@@ -139,6 +139,18 @@ def test_incomplete_s3_configuration_is_reported(monkeypatch):
     assert cli.main(BATCH) == cli.EXIT_ERROR
 
 
+def test_stray_whitespace_around_variables_is_ignored(monkeypatch):
+    monkeypatch.setenv(config.ENV_S3_BUCKET, " essai\n")
+    monkeypatch.setenv(config.ENV_S3_ACCESS_KEY, "cle-de-test\r\n")
+    monkeypatch.setenv(config.ENV_S3_SECRET_KEY, "secret-de-test\n")
+    monkeypatch.setenv(config.ENV_S3_ENDPOINT, "http://127.0.0.1:9\n")
+    s3 = storage.from_env()
+    assert (s3.bucket, s3.endpoint_url) == ("essai", "http://127.0.0.1:9")
+    monkeypatch.setenv(config.ENV_CLIENT_ID, "id\n")
+    monkeypatch.setenv(config.ENV_CLIENT_SECRET, " secret-client ")
+    assert youtube._env_client() == ("id", "secret-client")
+
+
 # --- historique partagé ------------------------------------------------------
 
 def test_ledger_claim_is_exclusive_and_decisions(store):
