@@ -1,4 +1,4 @@
-"""Interface en ligne de commande : check, auth, clip, upload, history."""
+"""Interface en ligne de commande : check, auth, clip, upload, batch, history."""
 
 from __future__ import annotations
 
@@ -9,17 +9,18 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import __version__, clipmeta, config, history, logs, media, youtube
+from . import __version__, batch, clipmeta, config, history, ledger, logs, media, storage, youtube
 
 log = logging.getLogger("ytclips")
 
-EXIT_OK, EXIT_ERROR, EXIT_DUPLICATE = 0, 1, 3
+EXIT_OK, EXIT_ERROR, EXIT_DUPLICATE, EXIT_AUTH = 0, 1, 3, 4
 GOOGLE_LIBS = ("googleapiclient", "google.oauth2", "google_auth_oauthlib", "google_auth_httplib2")
 
 
@@ -40,6 +41,44 @@ def _has_module(name: str) -> bool:
         return importlib.util.find_spec(name) is not None
     except ModuleNotFoundError:
         return False
+
+
+def _check_storage(report, offline: bool) -> bool:
+    """Vérifie le stockage durable ; True s'il est utilisable par « batch »."""
+    kind = storage.configured_kind()
+    if kind is None:
+        report(False, f"stockage durable : non configuré ({', '.join(config.S3_REQUIRED)})")
+        return False
+    for name in (*config.S3_REQUIRED, config.ENV_S3_ENDPOINT) if kind == "s3" else ():
+        report(bool(os.environ.get(name)), f"variable d'environnement {name} définie")
+    if kind == "s3" and offline:
+        report(None, "stockage durable non testé (--offline)")
+        return False
+    try:
+        store = storage.from_env()
+        result = storage.self_test(store)
+        sources = len(batch.list_sources(store))
+        records = len(ledger.Ledger(store).records())
+    except storage.StorageError as error:
+        report(False, f"stockage durable : {error}")
+        return False
+    except Exception as error:  # noqa: BLE001 - diagnostic, on rapporte tout
+        report(False, f"stockage durable : {type(error).__name__}: {logs.redact(str(error))[:300]}")
+        return False
+    report(result["read_write"], f"stockage durable, lecture et écriture : {store.describe()}")
+    report(
+        result["exclusive"],
+        "stockage durable, création exclusive (anti-doublon entre exécutions simultanées)"
+        + ("" if result["exclusive"] else " : NON respectée par ce service"),
+    )
+    previous = result["previous"]
+    report(
+        None,
+        f"marqueur laissé par l'exécution précédente : {previous['at']} sur {previous['host']}"
+        if previous else "aucun marqueur d'une exécution précédente (première vérification de ce stockage)",
+    )
+    report(None, f"contenu du stockage : {sources} vidéo(s) source, {records} tentative(s) dans l'historique")
+    return result["read_write"] and result["exclusive"]
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -81,6 +120,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     libs_ok = True
     for name in GOOGLE_LIBS:
         libs_ok &= bool(report(_has_module(name), f"bibliothèque Python « {name} »"))
+    report(_has_module("boto3"), "bibliothèque Python « boto3 » (stockage durable)")
 
     network_ok = True
     if args.offline:
@@ -89,6 +129,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         for url in ("https://www.googleapis.com/discovery/v1/apis/youtube/v3/rest", "https://oauth2.googleapis.com/token"):
             network_ok &= bool(report(_reachable(url), f"accès réseau à {url.split('/')[2]}"))
 
+    for name in (config.ENV_CLIENT_ID, config.ENV_CLIENT_SECRET, config.ENV_REFRESH_TOKEN):
+        report(None, f"variable d'environnement {name} ({'présente' if os.environ.get(name) else 'absente'})")
     source = youtube.credential_source()
     report(source is not None, f"identifiants YouTube : {source or 'aucun (lancer « ytclips auth »)'}")
     connected = False
@@ -98,17 +140,21 @@ def cmd_check(args: argparse.Namespace) -> int:
             connected = channel is not None
             report(connected, f"connexion à la chaîne : {channel['title']} ({channel['id']})" if channel else "aucune chaîne YouTube sur ce compte")
         except Exception as error:  # noqa: BLE001 - diagnostic, on rapporte tout
-            report(False, f"connexion à la chaîne : {logs.redact(str(error))[:300]}")
+            report(False, f"connexion à la chaîne : {logs.redact(str(error))[:600]}")
+
+    durable_ok = _check_storage(report, args.offline)
 
     for status, text in lines:
         print(f"[{status}] {text}")
     clip_ready = ffmpeg_ok and storage_ok
+    upload_ready = clip_ready and connected and not in_repo
     print()
     print(f"Création de clips       : {'prête' if clip_ready else 'NON prête'}")
     print(f"Sous-titres SRT         : {'prêts' if clip_ready and subtitles_ok else 'NON prêts'}")
     print(f"Simulation (--dry-run)  : {'prête' if clip_ready else 'NON prête'}")
-    print(f"Envoi privé sur YouTube : {'prêt' if clip_ready and connected and not in_repo else 'NON prêt'}")
-    log.debug("check : clips=%s connexion=%s", clip_ready, connected)
+    print(f"Envoi privé sur YouTube : {'prêt' if upload_ready else 'NON prêt'}")
+    print(f"Traitement par lot      : {'prêt' if upload_ready and durable_ok else 'NON prêt'}")
+    log.debug("check : clips=%s connexion=%s stockage=%s", clip_ready, connected, durable_ok)
     return EXIT_OK if clip_ready else EXIT_ERROR
 
 
@@ -246,6 +292,9 @@ def cmd_upload(args: argparse.Namespace) -> int:
     except Exception as error:  # noqa: BLE001 - on classe puis on relance
         status = getattr(getattr(error, "resp", None), "status", None)
         message = logs.redact(f"{type(error).__name__}: {error}")
+        if youtube.is_auth_error(error):
+            store.mark_failed(row_id, message)
+            raise youtube.auth_error(error) from None
         if status is not None and 400 <= int(status) < 500:
             store.mark_failed(row_id, message)
             log.error("YouTube a refusé l'envoi (HTTP %s) : aucune vidéo créée, un nouvel essai est possible.", status)
@@ -270,15 +319,73 @@ def cmd_upload(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# --- batch -----------------------------------------------------------------
+
+def _interrupt(*_):
+    raise KeyboardInterrupt
+
+
+def cmd_batch(args: argparse.Namespace) -> int:
+    if not args.rights_confirmed:
+        raise media.MediaError(
+            "Ajoutez --rights-confirmed pour confirmer que vous êtes autorisé à republier "
+            "toutes les vidéos déposées dans « sources/ »."
+        )
+    if args.limit < 1 or args.max_attempts < 1:
+        raise media.MediaError("--limit et --max-attempts doivent valoir au moins 1.")
+    store = storage.require()
+    # Un arrêt demandé par la plateforme est consigné comme une interruption ordinaire.
+    signal.signal(signal.SIGTERM, _interrupt)
+    _, ok = batch.run(
+        store, limit=args.limit, dry_run=args.dry_run,
+        stale_seconds=args.stale_hours * 3600, max_attempts=args.max_attempts,
+    )
+    return EXIT_OK if ok else EXIT_ERROR
+
+
 # --- history ---------------------------------------------------------------
 
+def _remote_history(args: argparse.Namespace) -> int:
+    book = ledger.Ledger(storage.require())
+    if args.release is not None:
+        released = book.release(args.release)
+        if released:
+            log.info("Extrait %s libéré : il pourra être renvoyé.", released["content_key"][:12])
+            return EXIT_OK
+        log.error("Aucun extrait « pending » unique ne commence par « %s ».", args.release)
+        return EXIT_ERROR
+    records = book.records()
+    if args.json:
+        print(json.dumps(records, ensure_ascii=False, indent=2))
+        return EXIT_OK
+    if not records:
+        print(f"Historique partagé vide ({book.storage.describe()}).")
+        return EXIT_OK
+    for record in records:
+        state = record["status"] if record["status"] != ledger.PENDING else f"pending/{record.get('phase')}"
+        if record.get("start_ms", -1) >= 0:
+            span = f"[{media.format_timecode(record['start_ms'])} → {media.format_timecode(record['end_ms'])}]"
+        else:
+            span = "[bornes non déterminées]"
+        print(
+            f"{record['content_key'][:12]} n° {record['attempt']} | {record['updated_at']} | {state:17} | "
+            f"{record.get('privacy') or '-':7} | {record.get('video_id') or '-':11} | "
+            f"{record.get('source_key')} {span} | {record.get('title') or '-'}"
+        )
+        if record.get("error"):
+            print(f"      erreur : {record['error']}")
+    return EXIT_OK
+
+
 def cmd_history(args: argparse.Namespace) -> int:
+    if args.remote:
+        return _remote_history(args)
     store = history.History(config.history_path())
     if args.release is not None:
-        if store.release(args.release):
-            log.info("Entrée n° %d libérée : cet extrait peut être renvoyé.", args.release)
+        if args.release.isdigit() and store.release(int(args.release)):
+            log.info("Entrée n° %s libérée : cet extrait peut être renvoyé.", args.release)
             return EXIT_OK
-        log.error("Entrée n° %d introuvable ou pas à l'état « pending ».", args.release)
+        log.error("Entrée n° %s introuvable ou pas à l'état « pending ».", args.release)
         return EXIT_ERROR
     rows = store.rows()
     if args.json:
@@ -309,7 +416,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     check = commands.add_parser("check", help="vérifier l'environnement")
-    check.add_argument("--offline", action="store_true", help="ne pas tester le réseau ni la connexion YouTube")
+    check.add_argument("--offline", action="store_true", help="ne tester ni le réseau, ni YouTube, ni le stockage S3")
     check.set_defaults(handler=cmd_check)
 
     auth = commands.add_parser("auth", help="connecter la chaîne YouTube (OAuth)")
@@ -339,9 +446,21 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("--force", action="store_true", help="envoyer malgré un doublon dans l'historique")
     upload.set_defaults(handler=cmd_upload)
 
+    lot = commands.add_parser("batch", help="traiter les sources non traitées du stockage durable")
+    lot.add_argument("--rights-confirmed", action="store_true",
+                     help="je confirme être autorisé à republier toutes les vidéos de « sources/ »")
+    lot.add_argument("--dry-run", action="store_true", help="simulation : rien n'est écrit ni envoyé")
+    lot.add_argument("--limit", type=int, default=1, help="nombre maximal de sources par exécution (défaut 1)")
+    lot.add_argument("--max-attempts", type=int, default=3, help="essais par source avant abandon (défaut 3)")
+    lot.add_argument("--stale-hours", type=float, default=6,
+                     help="délai après lequel une réservation interrompue avant l'envoi est reprise (défaut 6)")
+    lot.set_defaults(handler=cmd_batch)
+
     hist = commands.add_parser("history", help="consulter l'historique des envois")
+    hist.add_argument("--remote", action="store_true", help="historique partagé du stockage durable (commande batch)")
     hist.add_argument("--json", action="store_true")
-    hist.add_argument("--release", type=int, metavar="N", help="libérer une entrée « pending » après vérification")
+    hist.add_argument("--release", metavar="ID",
+                      help="libérer une entrée « pending » après vérification (numéro local, ou début de clé avec --remote)")
     hist.set_defaults(handler=cmd_history)
     return parser
 
@@ -349,12 +468,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logs.setup(config.log_path(), args.verbose)
-    for name in (config.ENV_CLIENT_SECRET, config.ENV_REFRESH_TOKEN):
+    for name in (config.ENV_CLIENT_SECRET, config.ENV_REFRESH_TOKEN, config.ENV_S3_SECRET_KEY):
         logs.register_secret(os.environ.get(name))
     log.debug("Commande : %s", args.command)
     try:
         return args.handler(args)
-    except (media.MediaError, clipmeta.MetaError, youtube.YouTubeError) as error:
+    except youtube.AuthError as error:
+        log.error("%s", error)
+        return EXIT_AUTH
+    except (media.MediaError, clipmeta.MetaError, youtube.YouTubeError, storage.StorageError) as error:
         log.error("%s", error)
         return EXIT_ERROR
     except KeyboardInterrupt:

@@ -23,6 +23,63 @@ class YouTubeError(Exception):
     pass
 
 
+class AuthError(YouTubeError):
+    """Autorisation Google expirée, révoquée ou invalide : réessayer ne sert à rien."""
+
+
+def _renew_steps() -> str:
+    return (
+        "Aucune nouvelle tentative ne sera faite tant que la connexion n'est pas rétablie.\n"
+        "Pour la rétablir :\n"
+        "  1. sur votre ordinateur, lancer « ytclips auth » et autoriser de nouveau la chaîne ;\n"
+        f"  2. pour l'exécution cloud, recopier le champ « refresh_token » du fichier token.json dans la\n"
+        f"     variable {config.ENV_REFRESH_TOKEN} (Hoplite : Settings → Project → Environment).\n"
+        "Tant que l'écran de consentement OAuth est en mode « Test », Google fait expirer ce jeton tous les 7 jours."
+    )
+
+
+def _refusal_code(error: Exception) -> str:
+    for argument in error.args:
+        if isinstance(argument, dict) and argument.get("error"):
+            return str(argument["error"])
+    text = str(error)
+    for code in ("invalid_grant", "invalid_client", "unauthorized_client", "deleted_client", "invalid_scope"):
+        if code in text:
+            return code
+    status = getattr(getattr(error, "resp", None), "status", None)
+    return f"HTTP {status}" if status else "refus"
+
+
+def auth_error(error: Exception) -> AuthError:
+    """Message unique et explicite, quelle que soit l'étape où Google a refusé."""
+    if isinstance(error, AuthError):
+        return error
+    code = _refusal_code(error)
+    if code == "invalid_grant":
+        cause = "L'AUTORISATION GOOGLE A EXPIRÉ ou a été révoquée (invalid_grant)."
+    elif code in ("invalid_client", "unauthorized_client", "deleted_client"):
+        cause = (
+            f"Google ne reconnaît pas le client OAuth ({code}) : vérifier "
+            f"{config.ENV_CLIENT_ID} et {config.ENV_CLIENT_SECRET}."
+        )
+    else:
+        cause = f"Google a refusé l'autorisation ({code})."
+    return AuthError(cause + "\n" + _renew_steps())
+
+
+def is_auth_error(error: Exception) -> bool:
+    if isinstance(error, AuthError):
+        return True
+    try:
+        from google.auth.exceptions import RefreshError
+    except ImportError:
+        return False
+    if isinstance(error, RefreshError):
+        return True
+    status = getattr(getattr(error, "resp", None), "status", None)
+    return status is not None and int(status) == 401
+
+
 def _env_client() -> tuple[str, str] | None:
     client_id = os.environ.get(config.ENV_CLIENT_ID)
     client_secret = os.environ.get(config.ENV_CLIENT_SECRET)
@@ -82,12 +139,14 @@ def load_credentials():
         )
     for secret in (creds.refresh_token, creds.client_secret):
         register_secret(secret)
+    # Un seul essai : un refus de Google est définitif tant que l'utilisateur n'a pas renouvelé l'accès.
     try:
         creds.refresh(Request())
     except RefreshError as error:
+        raise auth_error(error) from None
+    except Exception as error:  # noqa: BLE001 - panne de transport, pas un refus
         raise YouTubeError(
-            f"Jeton refusé par Google ({error.args[0] if error.args else 'erreur'}). "
-            "Relancer « ytclips auth »."
+            f"Google est injoignable ({type(error).__name__}) : problème de réseau, l'autorisation n'est pas en cause."
         ) from None
     register_secret(creds.token)
     return creds

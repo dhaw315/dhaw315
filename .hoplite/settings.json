@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "scripts": {
+    "setup": {
+      "enabled": true,
+      "command": "bash yt-clips/scripts/setup.sh"
+    }
+  }
+}

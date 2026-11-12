@@ -17,6 +17,17 @@ ENV_CLIENT_ID = "YOUTUBE_CLIENT_ID"
 ENV_CLIENT_SECRET = "YOUTUBE_CLIENT_SECRET"
 ENV_REFRESH_TOKEN = "YOUTUBE_REFRESH_TOKEN"
 
+# Stockage durable partagé entre exécutions (bucket compatible S3).
+ENV_S3_BUCKET = "YTCLIPS_S3_BUCKET"
+ENV_S3_ACCESS_KEY = "YTCLIPS_S3_ACCESS_KEY_ID"
+ENV_S3_SECRET_KEY = "YTCLIPS_S3_SECRET_ACCESS_KEY"
+ENV_S3_ENDPOINT = "YTCLIPS_S3_ENDPOINT_URL"
+ENV_S3_REGION = "YTCLIPS_S3_REGION"
+ENV_S3_PREFIX = "YTCLIPS_S3_PREFIX"
+S3_REQUIRED = (ENV_S3_BUCKET, ENV_S3_ACCESS_KEY, ENV_S3_SECRET_KEY)
+# Variante sans service externe : un dossier (tests, disque partagé).
+ENV_STORAGE_DIR = "YTCLIPS_STORAGE_DIR"
+
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
