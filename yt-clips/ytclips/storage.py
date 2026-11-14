@@ -7,6 +7,7 @@ repose l'anti-doublon entre exécutions simultanées.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import shutil
 import socket
@@ -222,7 +223,11 @@ class S3Storage:
         from botocore.exceptions import BotoCoreError, ClientError
 
         try:
-            self.client.upload_file(str(source), self.bucket, self.prefix + key)
+            # Type déclaré : un lien vers une vidéo s'ouvre alors dans le navigateur au lieu d'être téléchargé.
+            kind = mimetypes.guess_type(key)[0]
+            self.client.upload_file(
+                str(source), self.bucket, self.prefix + key, ExtraArgs={"ContentType": kind} if kind else None
+            )
         except ClientError as error:
             raise self._fail("déposer", error) from None
         except (BotoCoreError, S3UploadFailedError) as error:

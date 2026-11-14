@@ -15,18 +15,20 @@ from .media import MediaError, _srt_stamp
 
 log = logging.getLogger("ytclips")
 
-MAX_CHARS, MAX_GAP_MS = 70, 600
+MAX_CHARS, MAX_CHARS_CJK, MAX_GAP_MS = 70, 28, 600
 
 
 def group_words(words: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
     """Regroupe des mots horodatés en répliques courtes qui s'arrêtent aux fins de phrase."""
     cues, current = [], []
     for index, (start, end, word) in enumerate(words):
-        current.append((start, end, word.strip()))
-        text = " ".join(item[2] for item in current)
+        current.append((start, end, word))
+        # Les mots portent leur propre espacement : aucun en japonais ou en chinois.
+        text = " ".join("".join(item[2] for item in current).split())
         following = words[index + 1][0] if index + 1 < len(words) else None
+        limit = MAX_CHARS_CJK if any(ord(char) > 0x2E80 for char in text) else MAX_CHARS
         if (
-            following is None or text.endswith((".", "?", "!", "…")) or len(text) >= MAX_CHARS
+            following is None or text.endswith((".", "?", "!", "…", "。", "？", "！")) or len(text) >= limit
             or following - end > MAX_GAP_MS
         ):
             if text:
