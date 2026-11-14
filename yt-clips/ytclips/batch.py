@@ -23,6 +23,8 @@ from .ledger import Ledger
 log = logging.getLogger("ytclips")
 
 SOURCES, CLIPS, RUNS, ANALYSIS = "sources/", "clips/", "state/runs/", "state/analysis/"
+RESERVED = "state/reserved/"  # sources que batch ne doit pas découper tout seul
+LONG_SOURCE_MS = 600_000
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 SPEC_KEYS = {"start", "end", "title", "description", "tags", "background", "srt_timing"}
 
@@ -118,30 +120,35 @@ def slug(text: str) -> str:
 def send_extract(
     storage, ledger: Ledger, creds, run_id: str, *, label: str, source_key: str, srt_key: str | None,
     local: Path, meta: dict, background: str, srt_timing: str, attempt: int, work: Path,
+    key: str | None = None, render=None, extra: dict | None = None,
 ) -> Outcome:
     """Réserve l'extrait, crée le clip, le conserve puis l'envoie en privé. `meta` est déjà validée."""
     clip = meta["clip"]
     start_ms, end_ms = clip["start_ms"], clip["end_ms"]
-    key = ledger_module.content_key(clip["source_sha256"], start_ms, end_ms)
+    key = key or ledger_module.content_key(clip["source_sha256"], start_ms, end_ms)
     record = ledger.claim(key, attempt, {
         "run_id": run_id, "source_key": source_key, "source_sha256": clip["source_sha256"],
         "start_ms": start_ms, "end_ms": end_ms, "title": meta["youtube"]["title"], "clip_key": None,
+        **(extra or {}),
     })
     if record is None:
         return Outcome(label, SKIPPED, "réservé au même instant par une autre exécution")
 
     # Avant l'envoi : aucune vidéo ne peut exister, tout arrêt est consigné comme un échec sûr.
     try:
-        srt_local = None
-        if srt_key:
-            srt_local = work / "source.srt"
-            storage.download(srt_key, srt_local)
         output = work / clip["file"]
-        log.info(
-            "Création du clip : de %s à %s, fond « %s ».",
-            media.format_timecode(start_ms), media.format_timecode(end_ms), background,
-        )
-        produced = media.render_clip(local, output, start_ms, end_ms, background, srt_local, srt_timing)
+        if render is not None:
+            produced = render(output)
+        else:
+            srt_local = None
+            if srt_key:
+                srt_local = work / "source.srt"
+                storage.download(srt_key, srt_local)
+            log.info(
+                "Création du clip : de %s à %s, fond « %s ».",
+                media.format_timecode(start_ms), media.format_timecode(end_ms), background,
+            )
+            produced = media.render_clip(local, output, start_ms, end_ms, background, srt_local, srt_timing)
         clip.update(sha256=media.sha256_file(output), subtitles=produced["subtitles"])
         meta_file = output.with_suffix(".json")
         clipmeta.save(meta_file, meta)
@@ -228,6 +235,17 @@ def _process(storage, ledger: Ledger, source: Source, creds, run_id: str, dry_ru
         problem = str(error)
         start_ms = end_ms = -1
 
+    # Un film entier sans fiche manuelle n'est pas découpé d'office : ses 60 premières secondes n'ont pas de sens.
+    if problem is None and not source.spec_key and info["duration_ms"] > LONG_SOURCE_MS:
+        if not dry_run:
+            storage.write(f"{RESERVED}{source.fingerprint}.json", json.dumps({
+                "source_key": source.key, "reason": "long", "duration_ms": info["duration_ms"], "at": ledger_module.now(),
+            }).encode())
+        return Outcome(
+            source.key, SKIPPED,
+            f"source de plus de {LONG_SOURCE_MS // 60000} minutes sans fiche : utiliser « ytclips montage » ou « ytclips propose »",
+        )
+
     key = ledger_module.content_key(source_sha, start_ms, end_ms)
     decision = ledger.decide(key, stale_seconds, max_attempts)
 
@@ -307,6 +325,9 @@ def run(storage, *, limit: int, dry_run: bool, stale_seconds: float, max_attempt
         # Une source analysée par « propose » et sans fiche manuelle relève de la sélection automatique.
         if not source.spec_key and storage.read(f"{ANALYSIS}{source.fingerprint}.json"):
             outcomes.append(Outcome(source.key, SKIPPED, "gérée par la sélection automatique (voir « ytclips proposals »)"))
+            continue
+        if not source.spec_key and storage.read(f"{RESERVED}{source.fingerprint}.json"):
+            outcomes.append(Outcome(source.key, SKIPPED, "film réservé au montage ou trop long pour un clip automatique"))
             continue
         known = ledger.lookup(source.fingerprint)
         if known:

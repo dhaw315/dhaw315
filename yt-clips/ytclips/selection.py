@@ -78,6 +78,42 @@ def ends_sentence(text: str) -> bool:
     return stripped.endswith((".", "!", "?"))
 
 
+class Bounds:
+    """Où un extrait peut commencer et finir sans couper une phrase.
+
+    En mode strict, une pause ne suffit pas : la réplique doit se terminer par une
+    ponctuation de fin de phrase ou des points de suspension.
+    """
+
+    def __init__(self, cues: list[Cue], duration_ms: int):
+        self.cues, self.duration_ms = cues, duration_ms
+
+    def gap_before(self, i: int) -> int:
+        return self.cues[i].start - self.cues[i - 1].end if i > 0 else self.cues[i].start
+
+    def gap_after(self, i: int) -> int:
+        if i + 1 < len(self.cues):
+            return self.cues[i + 1].start - self.cues[i].end
+        return self.duration_ms - self.cues[i].end
+
+    def end_ok(self, i: int, strict: bool = False) -> bool:
+        text = self.cues[i].text
+        if ends_sentence(text):
+            return True
+        if strict:
+            return text.rstrip(" \"'»”’)").endswith(("...", "…"))
+        return self.gap_after(i) >= PAUSE_MS or i + 1 == len(self.cues) or self.cues[i + 1].music
+
+    def start_ok(self, i: int, strict: bool = False) -> bool:
+        if self.cues[i].music:
+            return False
+        if i == 0 or self.cues[i - 1].music:
+            return True
+        if self.cues[i].text[:1].islower() and (strict or self.gap_before(i) < PAUSE_MS):
+            return False  # suite d'une phrase commencée avant
+        return self.end_ok(i - 1, strict)
+
+
 def _overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
     return max(0, min(a_end, b_end) - max(a_start, b_start))
 
@@ -105,24 +141,8 @@ def _safe(text: str, limit: int) -> str:
 def _dialogue_candidates(signals: Signals, cues: list[Cue], title: str, skip_start: int, skip_end: int) -> list[Candidate]:
     count = len(cues)
     limit_end = signals.duration_ms - skip_end
-
-    def gap_before(i: int) -> int:
-        return cues[i].start - cues[i - 1].end if i > 0 else cues[i].start
-
-    def gap_after(i: int) -> int:
-        return cues[i + 1].start - cues[i].end if i + 1 < count else signals.duration_ms - cues[i].end
-
-    def end_ok(i: int) -> bool:
-        return ends_sentence(cues[i].text) or gap_after(i) >= PAUSE_MS or i + 1 == count or cues[i + 1].music
-
-    def start_ok(i: int) -> bool:
-        if cues[i].music:
-            return False
-        if i == 0 or cues[i - 1].music:
-            return True
-        if cues[i].text[:1].islower() and gap_before(i) < PAUSE_MS:
-            return False  # suite d'une phrase commencée avant
-        return end_ok(i - 1)
+    bounds = Bounds(cues, signals.duration_ms)
+    gap_before, gap_after, end_ok, start_ok = bounds.gap_before, bounds.gap_after, bounds.end_ok, bounds.start_ok
 
     candidates = []
     for i in range(count):
