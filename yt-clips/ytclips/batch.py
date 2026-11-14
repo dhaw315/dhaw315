@@ -119,7 +119,7 @@ def slug(text: str) -> str:
 
 def send_extract(
     storage, ledger: Ledger, creds, run_id: str, *, label: str, source_key: str, srt_key: str | None,
-    local: Path, meta: dict, background: str, srt_timing: str, attempt: int, work: Path,
+    local: Path | None, meta: dict, background: str, srt_timing: str, attempt: int, work: Path,
     key: str | None = None, render=None, extra: dict | None = None,
 ) -> Outcome:
     """Réserve l'extrait, crée le clip, le conserve puis l'envoie en privé. `meta` est déjà validée."""

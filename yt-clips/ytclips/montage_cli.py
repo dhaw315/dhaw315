@@ -35,6 +35,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         storage.require(), args.source, dry_run=args.dry_run, cutoff=args.cutoff,
         skip_start_ms=round(args.skip_start * 1000), skip_end_ms=round(args.skip_end * 1000),
         ranges=_ranges(args.segments), zoom=args.zoom, background=args.background, title=args.title,
+        cut_bottom=args.cut_bottom,
     )
     return OK if item else ERROR
 
@@ -62,6 +63,21 @@ def cmd_send(args: argparse.Namespace) -> int:
     return OK if ok else ERROR
 
 
+def cmd_build(args: argparse.Namespace) -> int:
+    item = montages.build(storage.require(), args.id, force=args.force)
+    log.info("Pour le regarder : ytclips montage link %s", item["content_key"][:12])
+    return OK
+
+
+def cmd_link(args: argparse.Namespace) -> int:
+    item, url = montages.link(storage.require(), args.id, args.hours)
+    # Affichage direct, hors journal : le lien donne accès au fichier pendant sa durée de validité.
+    print(f"Montage : {item['clip_key']}")
+    print(f"Lien    : {url}")
+    print(f"          (valable {args.hours:g} h ; ne pas le partager)")
+    return OK
+
+
 def cmd_transcribe(args: argparse.Namespace) -> int:
     montages.transcribe(storage.require(), args.source, model=args.model, language=args.language, force=args.force)
     return OK
@@ -81,6 +97,8 @@ def register(commands) -> None:
     plan.add_argument("--segments", help="imposer les passages : « début-fin, début-fin, … » (4 à 6, total 60 s)")
     plan.add_argument("--zoom", type=float, default=1.0,
                       help="1.0 : image entière (défaut) ; jusqu'à 2.0 : recadrage centré, les bords latéraux sont perdus")
+    plan.add_argument("--cut-bottom", type=float, default=0.0, metavar="F",
+                      help="fraction du bas de l'image à retirer, par exemple 0.2 pour masquer des sous-titres incrustés")
     plan.add_argument("--background", default="blur", help="blur (défaut), black ou couleur #RRGGBB")
     plan.add_argument("--title", help="titre du film, pour le titre et la description du montage")
     plan.set_defaults(handler=cmd_plan)
@@ -88,6 +106,16 @@ def register(commands) -> None:
     listing = actions.add_parser("list", help="lister les plans de montage, leurs passages et leur état")
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(handler=cmd_list)
+
+    build = actions.add_parser("build", help="créer le montage et le garder dans le stockage, SANS rien envoyer")
+    build.add_argument("id", nargs="?", help="début de l'identifiant du plan (facultatif s'il n'y en a qu'un en attente)")
+    build.add_argument("--force", action="store_true", help="recréer un montage déjà créé")
+    build.set_defaults(handler=cmd_build)
+
+    link = actions.add_parser("link", help="lien de téléchargement temporaire du montage créé")
+    link.add_argument("id", nargs="?")
+    link.add_argument("--hours", type=float, default=24, help="durée de validité du lien (défaut 24, maximum 168)")
+    link.set_defaults(handler=cmd_link)
 
     send = actions.add_parser("send", help="créer le montage, l'envoyer en PRIVÉ sur YouTube et préparer TikTok")
     send.add_argument("id", nargs="?", help="début de l'identifiant du plan (facultatif s'il n'y en a qu'un)")

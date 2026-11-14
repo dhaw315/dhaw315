@@ -75,7 +75,7 @@ def ends_sentence(text: str) -> bool:
     stripped = text.rstrip(" \"'»”’)")
     if stripped.endswith(("...", "…")):
         return False
-    return stripped.endswith((".", "!", "?"))
+    return stripped.endswith((".", "!", "?", "。", "！", "？"))
 
 
 class Bounds:
