@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ytclips"
-version = "0.4.0"
+version = "0.5.0"
 description = "Clips verticaux 1080x1920 avec FFmpeg et envoi privé sur YouTube"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,6 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["moto[s3,server]>=5.1", "pytest>=8"]
+# Transcription locale, facultative : lourde, donc absente de l'installation par défaut.
+transcribe = ["faster-whisper>=1.1"]
 
 [project.scripts]
 ytclips = "ytclips.cli:main"

@@ -51,3 +51,29 @@ def analyze(path: Path, info: dict) -> Signals:
     if result.returncode != 0:
         raise MediaError("Analyse FFmpeg impossible :\n" + result.stderr.strip()[-800:])
     return parse_log(result.stderr, info["duration_ms"], info["has_audio"])
+
+
+_CROP = re.compile(r"crop=(\d+):(\d+):(\d+):(\d+)")
+
+
+def detect_crop(path: Path, info: dict) -> str | None:
+    """Zone utile de l'image si le fichier contient des bandes noires, sinon None."""
+    areas = []
+    for fraction in (0.2, 0.45, 0.7):
+        result = subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-loglevel", "info",
+             "-ss", f"{info['duration_ms'] * fraction / 1000:.3f}", "-t", "4", "-i", str(path),
+             "-vf", "cropdetect=limit=24:round=2", "-an", "-f", "null", "-"],
+            capture_output=True, text=True, errors="replace",
+        )
+        found = _CROP.findall(result.stderr)
+        if found:
+            areas.append(tuple(int(value) for value in found[-1]))
+    if not areas:
+        return None
+    # Le plus grand cadre observé : une scène sombre ne doit pas faire rogner l'image.
+    width, height, x, y = max(areas, key=lambda area: area[0] * area[1])
+    full = info["width"] * info["height"]
+    if width * height >= full * 0.97 or width * height < full * 0.5:
+        return None
+    return f"{width}:{height}:{x}:{y}"

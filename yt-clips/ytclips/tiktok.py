@@ -71,7 +71,7 @@ def prepare(storage, dry_run: bool = False) -> list[dict]:
         try:
             meta = json.loads(storage.read(meta_key) or b"")
             clip = meta["clip"]
-            content_key = ledger.content_key(clip["source_sha256"], clip["start_ms"], clip["end_ms"])
+            content_key = clip.get("content_key") or ledger.content_key(clip["source_sha256"], clip["start_ms"], clip["end_ms"])
             title = str(meta["youtube"]["title"])
         except (ValueError, KeyError, TypeError):
             log.warning("  [ignoré] %s — fiche de clip illisible.", meta_key)

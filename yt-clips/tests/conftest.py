@@ -102,6 +102,24 @@ def tiny_video(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
+def film(tmp_path_factory):
+    """Un « film » de 5 minutes : trois plans de 100 s et une bande-son continue."""
+    path = tmp_path_factory.mktemp("film") / "film.mp4"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=red:s=320x180:r=5:d=100",
+         "-f", "lavfi", "-i", "color=c=blue:s=320x180:r=5:d=100",
+         "-f", "lavfi", "-i", "color=c=green:s=320x180:r=5:d=100",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=300",
+         "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+         "-map", "[v]", "-map", "3:a", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", str(path)],
+        check=True,
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
 def episode(tmp_path_factory):
     """100 s, trois plans (coupes à 30 s et 70 s), son présent pendant les trois dialogues seulement."""
     path = tmp_path_factory.mktemp("episode") / "episode.mp4"

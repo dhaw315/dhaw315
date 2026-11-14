@@ -17,7 +17,8 @@ import urllib.request
 from pathlib import Path
 
 from . import (
-    __version__, batch, clipmeta, config, curate_cli, curation, history, ledger, logs, media, storage, tiktok_cli, youtube,
+    __version__, batch, clipmeta, config, curate_cli, curation, history, ledger, logs, media, montage_cli, storage,
+    tiktok_cli, youtube,
 )
 
 log = logging.getLogger("ytclips")
@@ -381,7 +382,7 @@ def _remote_history(args: argparse.Namespace) -> int:
         if record.get("start_ms", -1) >= 0:
             span = f"[{media.format_timecode(record['start_ms'])} → {media.format_timecode(record['end_ms'])}]"
         else:
-            span = "[bornes non déterminées]"
+            span = f"[montage de {len(record['segments'])} passages]" if record.get("segments") else "[bornes non déterminées]"
         print(
             f"{record['content_key'][:12]} n° {record['attempt']} | {record['updated_at']} | {state:17} | "
             f"{record.get('privacy') or '-':7} | {record.get('video_id') or '-':11} | "
@@ -481,6 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
     hist.set_defaults(handler=cmd_history)
     curate_cli.register(commands)
     tiktok_cli.register(commands)
+    montage_cli.register(commands)
     return parser
 
 

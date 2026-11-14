@@ -218,11 +218,11 @@ la traite plus. Les sources ne sont jamais modifiées ni supprimées.
 ### Sans sous-titres
 
 Les bornes sont alors posées sur les pauses de la bande-son, sans garantie sur les fins de phrases ;
-la proposition le signale dans sa raison. Aucune transcription n'est activée. Deux options, à décider :
+la proposition le signale dans sa raison. Deux options :
 
 | Option | Coût | Besoins |
 | --- | --- | --- |
-| Transcription locale (modèle Whisper libre) | gratuit | nouvelle dépendance Python, modèle de plusieurs centaines de Mo à télécharger dans chaque environnement neuf, temps de calcul non mesuré |
+| Transcription locale (`ytclips transcribe`, voir la section sur le montage) | gratuit | option à installer, modèle d'environ 0,5 Go à télécharger dans chaque environnement neuf, de l'ordre d'un quart de la durée de l'audio |
 | API de transcription OpenAI | de 0,003 à 0,006 $ par minute d'audio selon le modèle (tarifs publiés le 12/11/2026), soit environ 0,14 à 0,27 $ pour 45 minutes | clé d'API en variable de projet, audio transmis à un tiers |
 
 ### Publication publique
@@ -253,6 +253,78 @@ L'import est désactivé tant que `YTCLIPS_IMPORT_ALLOWED_HOSTS` ne liste pas le
 le droit de reprendre les vidéos. Il ne fait que télécharger en HTTPS un fichier vidéo désigné
 directement, sans jamais remplacer une source existante. Une page web, un lecteur, un accès refusé ou
 un fichier illisible arrêtent l'import : aucune protection n'est contournée.
+
+## Montage de 60 secondes à partir d'un film
+
+Au lieu de plusieurs clips indépendants, `montage` assemble 4 à 6 passages d'un film en un seul MP4
+vertical de 60 secondes, sous-titré, envoyé en privé sur YouTube et préparé pour TikTok.
+
+```bash
+ytclips montage plan --source sources/mon_film.mkv --title "Titre du film"   # analyse et plan
+ytclips montage list                                                         # passages, timecodes, raisons
+ytclips montage send --rights-confirmed                                      # montage, envoi PRIVÉ, fiche TikTok
+ytclips tiktok link <id>                                                     # légende et lien de téléchargement
+```
+
+`plan` et `send` acceptent `--dry-run` ; pour `send`, le montage est alors créé puis jeté.
+
+### Comment les passages sont choisis
+
+Le programme ne comprend pas l'histoire : il applique des règles mesurables, et le plan reste à relire.
+
+- **Ensemble** : la partie retenue du film est découpée en 4 à 6 zones égales et un passage est pris dans
+  chacune, dans l'ordre du film. Le premier sert d'introduction, le dernier de conclusion.
+- **Fin du film** : rien n'est pris après 75 % de la durée (`--cutoff`), pour ne pas révéler le dénouement.
+- **Phrases** : un passage commence au début d'une phrase et finit sur une fin de phrase. Si la
+  ponctuation des sous-titres ne le permet pas, les bornes sont posées sur des pauses et le plan le dit.
+- **Génériques et répétitions** : les paroles de chanson et indications (`♪`, `[Musique]`) sont écartées,
+  comme deux passages aux dialogues trop proches ; `--skip-start` et `--skip-end` écartent un générique parlé.
+- **Durée** : la combinaison retenue totalise exactement 60 s. L'ajustement se fait sur les marges de
+  silence avant et après le dialogue, jamais en coupant une réplique, et sans déborder sur un autre plan
+  tant que c'est possible.
+- **Préférence** : à règles égales, les passages au dialogue dense, avec questions ou exclamations et
+  changements de plan, passent devant. Cela ne mesure pas ce qu'un spectateur trouvera marquant.
+
+Pour corriger un plan, imposez les passages : `--segments "00:04:10-00:04:22.5, 00:17:03-00:17:15, …"`
+(4 à 6 passages, 60 s au total, aucune réplique coupée ; sinon la commande refuse et dit pourquoi).
+
+Le plan est une fiche `state/montages/<id>.json` : pour chaque passage, ses timecodes, son texte et la
+raison du choix. Aucune musique ni filigrane n'est ajouté ; le son est celui du film, avec un fondu de
+40 ms aux raccords.
+
+### Cadrage
+
+Par défaut l'image entière du film est conservée, sur fond flou, et les bandes noires du fichier sont
+retirées. `--zoom 1.35` agrandit l'image en rognant ses bords latéraux, au centre : il n'y a pas de
+suivi automatique de l'action. Changer de zoom donne un nouveau plan, donc un nouvel envoi.
+
+### Sous-titres et transcription
+
+Dans l'ordre : le fichier `.srt` de même nom que le film ; sinon une copie déjà enregistrée dans le
+stockage ; sinon une piste de sous-titres texte du fichier (la française si elle existe). Les pistes
+en image (Blu-ray, DVD) ne sont pas lisibles.
+
+À défaut, `ytclips transcribe --source … --language fr` transcrit la bande-son sur la machine, sans
+service payant, puis enregistre le résultat. Cette option n'est pas installée par défaut :
+
+```bash
+uv sync --frozen --extra dev --extra transcribe
+```
+
+Elle ajoute plusieurs centaines de Mo de bibliothèques et télécharge le modèle à la première
+utilisation dans chaque environnement neuf (environ 0,5 Go pour `small`). Mesuré sur 4 processeurs,
+avec une voix de synthèse en anglais : environ un quart de la durée de l'audio pour `small`, soit de
+l'ordre d'une demi-heure pour un film de deux heures. La transcription donne la langue parlée : elle
+ne traduit pas vers le français.
+
+### Réutilisation
+
+L'analyse du film entier (`state/signals/`) et ses sous-titres extraits ou transcrits
+(`state/transcripts/`) sont enregistrés une fois. Tant que le fichier du film ne change pas, un
+nouveau plan ne refait ni l'une ni l'autre, et ne retélécharge pas le film.
+
+`batch` ne découpe plus de lui-même une source de plus de 10 minutes sans fiche `.json` : il la laisse
+à `montage` ou à `propose`.
 
 ## TikTok : préparation pour une publication manuelle
 

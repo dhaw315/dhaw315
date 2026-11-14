@@ -82,11 +82,18 @@ def probe(path: Path) -> dict:
     if video is None:
         raise MediaError(f"Aucune piste vidéo dans {path.name}.")
     duration = float(info.get("format", {}).get("duration") or video.get("duration") or 0)
+    rate = str(video.get("avg_frame_rate") or "")
+    try:
+        fps = float(rate.split("/")[0]) / float(rate.split("/")[1])
+    except (ValueError, IndexError, ZeroDivisionError):
+        fps = 0.0
     return {
         "duration_ms": round(duration * 1000),
         "width": int(video["width"]),
         "height": int(video["height"]),
         "has_audio": any(s.get("codec_type") == "audio" for s in info["streams"]),
+        "fps": fps,
+        "fps_text": rate,
     }
 
 
@@ -255,6 +262,141 @@ def render_clip(
     if abs(produced["duration_ms"] - duration_ms) > 500:
         raise MediaError(
             f"Durée inattendue : {produced['duration_ms'] / 1000:.2f} s au lieu de {duration_ms / 1000:.2f} s."
+        )
+    produced["subtitles"] = subtitles_file is not None
+    return produced
+
+
+# --- Pistes de sous-titres intégrées ----------------------------------------
+
+TEXT_SUBTITLES = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+
+def subtitle_streams(path: Path) -> list[dict]:
+    """Pistes de sous-titres du fichier, dans l'ordre : position, codec, langue."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+         "stream=codec_name:stream_tags=language,title", "-of", "json", str(path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    streams = json.loads(result.stdout or "{}").get("streams", [])
+    return [
+        {"position": position, "codec": stream.get("codec_name", ""),
+         "language": str((stream.get("tags") or {}).get("language", "")).lower()}
+        for position, stream in enumerate(streams)
+    ]
+
+
+def extract_subtitles(path: Path, position: int, output: Path) -> str:
+    """Convertit une piste de sous-titres texte en SRT (aucune reconnaissance d'image)."""
+    result = subprocess.run(
+        ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(path),
+         "-map", f"0:s:{position}", "-c:s", "srt", "-f", "srt", str(output)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise MediaError("Extraction des sous-titres impossible :\n" + result.stderr.strip()[-500:])
+    return read_srt(output)
+
+
+# --- Montage de plusieurs passages -------------------------------------------
+
+def montage_filter(
+    durations_ms: list[int], background: str, subtitles_file: str | None, has_audio: bool,
+    fps: str, zoom: float = 1.0, crop: str | None = None,
+) -> str:
+    """Chaque passage est mis au format vertical, puis les passages sont mis bout à bout."""
+    before = f"crop={crop}," if crop else ""
+    fit = f"scale={round(WIDTH * zoom / 2) * 2}:{HEIGHT}:force_original_aspect_ratio=decrease:force_divisible_by=2"
+    if zoom > 1:
+        fit += f",crop=min(iw\\,{WIDTH}):ih"  # recadrage centré : les bords latéraux sont perdus
+    parts, joined = [], ""
+    for k, duration in enumerate(durations_ms):
+        if background == "blur":
+            parts.append(
+                f"[{k}:v:0]{before}split=2[a{k}][b{k}];"
+                f"[a{k}]scale={WIDTH // 4}:{HEIGHT // 4}:force_original_aspect_ratio=increase,"
+                f"crop={WIDTH // 4}:{HEIGHT // 4},gblur=sigma=8,scale={WIDTH}:{HEIGHT},"
+                f"eq=brightness=-0.10:saturation=0.9[bg{k}];"
+                f"[b{k}]{fit}[fg{k}];"
+                f"[bg{k}][fg{k}]overlay=(W-w)/2:(H-h)/2,setsar=1,fps={fps},format=yuv420p[v{k}]"
+            )
+        else:
+            color = "black" if background == "black" else "0x" + background.lstrip("#")
+            parts.append(
+                f"[{k}:v:0]{before}{fit},pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color={color},"
+                f"setsar=1,fps={fps},format=yuv420p[v{k}]"
+            )
+        joined += f"[v{k}]"
+        if has_audio:
+            # Fondus de 40 ms : pas de claquement aux raccords, aucun son ajouté.
+            end = max(duration / 1000 - 0.04, 0)
+            parts.append(
+                f"[{k}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"afade=t=in:d=0.04,afade=t=out:st={end:.3f}:d=0.04[s{k}]"
+            )
+            joined += f"[s{k}]"
+    count = len(durations_ms)
+    parts.append(f"{joined}concat=n={count}:v=1:a={1 if has_audio else 0}[vc]" + ("[ac]" if has_audio else ""))
+    last = f"subtitles=filename={subtitles_file}:force_style='{SUBTITLE_STYLE}'," if subtitles_file else ""
+    parts.append(f"[vc]{last}format=yuv420p[v]")
+    return ";".join(parts)
+
+
+def render_montage(
+    source: Path, output: Path, ranges: list[tuple[int, int]], *, background: str = "blur",
+    srt_text: str | None = None, zoom: float = 1.0, crop: str | None = None,
+) -> dict:
+    """Assemble les passages en un seul MP4 vertical et renvoie ses caractéristiques mesurées."""
+    require_tools()
+    background = validate_background(background)
+    if not 1.0 <= zoom <= 2.0:
+        raise MediaError("Le zoom doit être compris entre 1.0 (image entière) et 2.0.")
+    info = probe(source)
+    for start, end in ranges:
+        if not 0 <= start < end <= info["duration_ms"] + 50:
+            raise MediaError(f"Passage hors de la source : {format_timecode(start)} → {format_timecode(end)}.")
+    durations = [end - start for start, end in ranges]
+    total_ms = sum(durations)
+    fps = info["fps_text"] if 23 <= info["fps"] <= 60 else "30"
+    source, output = source.resolve(), output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="ytclips-") as work:
+        subtitles_file = None
+        if srt_text:
+            subtitles_file = "subs.srt"
+            (Path(work) / subtitles_file).write_text(srt_text, encoding="utf-8")
+        command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
+        for (start, _), duration in zip(ranges, durations):
+            command += ["-ss", f"{start / 1000:.3f}", "-t", f"{duration / 1000:.3f}", "-i", str(source)]
+        command += [
+            "-filter_complex",
+            montage_filter(durations, background, subtitles_file, info["has_audio"], fps, zoom, crop),
+            "-map", "[v]",
+        ]
+        if info["has_audio"]:
+            command += ["-map", "[ac]", "-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
+        partial = output.with_name(output.name + ".partial")
+        command += [
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", "-t", f"{total_ms / 1000:.3f}", "-f", "mp4", str(partial),
+        ]
+        log.debug("Commande FFmpeg : %s", " ".join(command))
+        result = subprocess.run(command, cwd=work, capture_output=True, text=True)
+        if result.returncode != 0:
+            partial.unlink(missing_ok=True)
+            raise MediaError("FFmpeg a échoué :\n" + result.stderr.strip()[-1500:])
+        partial.replace(output)
+
+    produced = probe(output)
+    if (produced["width"], produced["height"]) != (WIDTH, HEIGHT):
+        raise MediaError(f"Dimensions inattendues : {produced['width']}x{produced['height']}.")
+    if abs(produced["duration_ms"] - total_ms) > 300:
+        raise MediaError(
+            f"Durée inattendue : {produced['duration_ms'] / 1000:.2f} s au lieu de {total_ms / 1000:.2f} s."
         )
     produced["subtitles"] = subtitles_file is not None
     return produced
