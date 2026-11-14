@@ -1,4 +1,5 @@
 import json
+import tempfile
 import subprocess
 
 import pytest
@@ -145,6 +146,10 @@ def test_words_are_grouped_into_short_cues():
     cues = engine.group_words(words)
     assert cues == [(0, 1500, "Bonjour à tous."), (1600, 2500, "Ça va"), (4000, 5000, "bien ?")]
     assert media.parse_srt(engine.to_srt(cues)) == cues
+    # Japonais : pas d'espace entre les mots, ponctuation propre à la langue.
+    japanese = [(0, 300, "今日"), (300, 500, "は"), (500, 900, "行く"), (900, 1000, "。"), (1100, 1500, "本当"), (1500, 1700, "？")]
+    assert engine.group_words(japanese) == [(0, 1000, "今日は行く。"), (1100, 1700, "本当？")]
+    assert selection.ends_sentence("今日は行く。") and not selection.ends_sentence("今日は")
 
 
 # --- avec FFmpeg et un stockage ----------------------------------------------
@@ -221,7 +226,24 @@ def test_montage_from_plan_to_private_upload_and_tiktok(store, film, tiny_video,
     assert len(montages.records(store)) == 1
 
     assert cli.main(["montage", "send"]) == cli.EXIT_ERROR  # --rights-confirmed obligatoire
-    assert cli.main(["montage", "send", RIGHTS]) == 0
+
+    # Montage sans envoi : le fichier est dans le stockage, YouTube n'est pas contacté.
+    assert cli.main(["montage", "link"]) == cli.EXIT_ERROR  # pas encore créé
+    assert cli.main(["montage", "build"]) == 0
+    (item,) = montages.records(store)
+    assert item["status"] == "built" and item["video_id"] is None and item["clip_key"].startswith("clips/film_montage_")
+    assert sent == [] and ledger.Ledger(store).records() == []
+    assert [fiche["status"] for fiche in tiktok.records(store)] == ["ready"]
+    capsys.readouterr()
+    assert cli.main(["montage", "link", "--hours", "2"]) == 0
+    assert item["clip_key"] in capsys.readouterr().out
+    assert cli.main(["batch", RIGHTS]) == 0 and sent == []  # le traitement par lot n'envoie pas ce montage
+
+    # L'envoi reprend le fichier déjà monté, sans second rendu.
+    with monkeypatch.context() as patch:
+        patch.setattr(media, "render_montage", lambda *a, **k: pytest.fail("montage refait"))
+        assert cli.main(["montage", "build"]) == 0
+        assert cli.main(["montage", "send", RIGHTS]) == 0
     assert sent == ["Le Film — en 60 secondes"]
     (item,) = montages.records(store)
     assert (item["status"], item["video_id"], item["privacy"]) == ("sent", "vid1", "private")
@@ -247,6 +269,38 @@ def test_montage_from_plan_to_private_upload_and_tiktok(store, film, tiny_video,
     assert cli.main(["history", "--remote"]) == 0 and cli.main(["montage", "list"]) == 0
     captured = capsys.readouterr()
     assert f"montage de {len(item['segments'])} passages" in captured.out and "https://youtu.be/vid1" in captured.err
+
+
+@needs_ffmpeg
+def test_cut_bottom_and_own_subtitles(store, film, sent, tmp_path):
+    store.upload(film, "sources/film.mp4")
+    store.write("sources/film.srt", to_srt(film_rows()).encode())
+    assert cli.main(["montage", "plan", "--cut-bottom", "0.9"]) == cli.EXIT_ERROR
+    assert cli.main(["montage", "plan"]) == 0 and cli.main(["montage", "plan", "--cut-bottom", "0.2"]) == 0
+    whole, cut = sorted(montages.records(store), key=lambda item: item["cut_bottom"])
+    assert (whole["crop"], cut["crop"], cut["cut_bottom"]) == (None, "320:144:0:0", 0.2)
+    assert whole["content_key"] != cut["content_key"]
+    assert [s["start_ms"] for s in whole["segments"]] == [s["start_ms"] for s in cut["segments"]]
+    assert cli.main(["montage", "build", cut["content_key"][:10]]) == 0
+    (built,) = [item for item in montages.records(store) if item["status"] == "built"]
+    produced = media.probe(store.root / built["clip_key"])
+    assert (produced["width"], produced["height"]) == (1080, 1920) and abs(produced["duration_ms"] - 60_000) <= 300
+    assert sent == []
+
+    # Sous-titres propres au montage : ils remplacent ceux du film et obligent à refaire le montage.
+    ident = cut["content_key"][:10]
+    first = cut["segments"][0]
+    outside, inside = tmp_path / "ailleurs.srt", tmp_path / "traduction.srt"
+    outside.write_text(to_srt([(299.0, 299.5, "Hors du montage.")]), encoding="utf-8")
+    inside.write_text(to_srt([(first["start_ms"] / 1000 + 0.5, first["start_ms"] / 1000 + 2.5, "Réplique traduite.")]), encoding="utf-8")
+    assert cli.main(["montage", "subtitles", ident, "--file", str(outside)]) == cli.EXIT_ERROR
+    assert cli.main(["montage", "subtitles", ident, "--file", str(tmp_path / "absent.srt")]) == cli.EXIT_ERROR
+    assert cli.main(["montage", "subtitles", ident, "--file", str(inside)]) == 0
+    (again,) = [item for item in montages.records(store) if item["content_key"] == cut["content_key"]]
+    assert (again["status"], again["clip_key"], again["subtitles_origin"]) == ("planned", None, "fichier propre à ce montage")
+    with tempfile.TemporaryDirectory() as work:
+        assert media.parse_srt(montages._Job(store, again, work).srt_text) == [(500, 2500, "Réplique traduite.")]
+    assert cli.main(["montage", "build", ident]) == 0 and len(montages.records(store)) == 2
 
 
 @needs_ffmpeg
